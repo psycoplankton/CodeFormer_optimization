@@ -8,6 +8,7 @@ from typing import Optional, List
 from basicsr.archs.vqgan_arch import *
 from basicsr.utils import get_root_logger
 from basicsr.utils.registry import ARCH_REGISTRY
+from basicsr.archs.QuantizableLinear import MultiheadAttention
 
 def calc_mean_std(feat, eps=1e-5):
     """Calculate mean and std for adaptive_instance_normalization.
@@ -99,7 +100,7 @@ def _get_activation_fn(activation):
 class TransformerSALayer(nn.Module):
     def __init__(self, embed_dim, nhead=8, dim_mlp=2048, dropout=0.0, activation="gelu"):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(embed_dim, nhead, dropout=dropout)
+        self.self_attn = MultiheadAttention(embed_dim, nhead, dropout=dropout)
         # Implementation of Feedforward model - MLP
         self.linear1 = nn.Linear(embed_dim, dim_mlp)
         self.dropout = nn.Dropout(dropout)
@@ -231,7 +232,7 @@ class CodeFormer(VQAutoEncoder):
 
         lq_feat = x
         # ################# Transformer ###################
-        # quant_feat, codebook_loss, quant_stats = self.quantize(lq_feat)
+        quant_feat, codebook_loss, quant_stats = self.quantize(lq_feat)
         pos_emb = self.position_emb.unsqueeze(1).repeat(1,x.shape[0],1)
         # BCHW -> BC(HW) -> (HW)BC
         feat_emb = self.feat_emb(lq_feat.flatten(2).permute(2,0,1))
@@ -249,16 +250,17 @@ class CodeFormer(VQAutoEncoder):
             return logits, lq_feat
 
         # ################# Quantization ###################
-        # if self.training:
-        #     quant_feat = torch.einsum('btn,nc->btc', [soft_one_hot, self.quantize.embedding.weight])
-        #     # b(hw)c -> bc(hw) -> bchw
-        #     quant_feat = quant_feat.permute(0,2,1).view(lq_feat.shape)
+        #soft_one_hot = F.softmax(logits, dim=2)
+        #if self.training:
+            #quant_feat = torch.einsum('btn,nc->btc', [soft_one_hot, self.quantize.embedding.weight])
+            # b(hw)c -> bc(hw) -> bchw
+            #quant_feat = quant_feat.permute(0,2,1).view(lq_feat.shape)
         # ------------
         soft_one_hot = F.softmax(logits, dim=2)
         _, top_idx = torch.topk(soft_one_hot, 1, dim=2)
         quant_feat = self.quantize.get_codebook_feat(top_idx, shape=[x.shape[0],16,16,256])
         # preserve gradients
-        # quant_feat = lq_feat + (quant_feat - lq_feat).detach()
+        quant_feat = lq_feat + (quant_feat - lq_feat).detach()
 
         if detach_16:
             quant_feat = quant_feat.detach() # for training stage III
